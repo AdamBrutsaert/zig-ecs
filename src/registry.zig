@@ -4,6 +4,7 @@ const Entity = @import("entity.zig").Entity;
 const SparseSet = @import("sparse_set.zig").SparseSet;
 const SparseSetEntityIterator = @import("sparse_set.zig").EntityIterator;
 
+/// A view over a set of components.
 pub fn View(comptime Types: anytype) type {
     const T = @TypeOf(Types);
     const info = @typeInfo(T);
@@ -16,14 +17,21 @@ pub fn View(comptime Types: anytype) type {
     const Tuple = std.meta.Tuple(&types);
 
     return struct {
+        /// The sparse sets of the components.
         sparse_sets: Tuple,
 
+        /// The view.
         const Self = @This();
 
+        /// An iterator over the entities.
         pub const EntityIterator = struct {
+            /// The sparse sets of the components.
             sparse_sets: Tuple,
+
+            /// The entity iterator.
             iterator: SparseSetEntityIterator,
 
+            /// Retrieves the next entity which has all the components.
             pub fn next(self: *EntityIterator) ?Entity {
                 while (self.iterator.next()) |entity| {
                     var found = true;
@@ -44,6 +52,7 @@ pub fn View(comptime Types: anytype) type {
             }
         };
 
+        /// Returns an iterator over the entities that have all the components.
         pub fn entityIterator(self: *Self) EntityIterator {
             var len = self.sparse_sets[0].size();
             var it = self.sparse_sets[0].entityIterator();
@@ -63,16 +72,31 @@ pub fn View(comptime Types: anytype) type {
     };
 }
 
+/// A registry of entities and their components.
+///
+/// The registry stores an allocator internally.
 pub const Registry = struct {
+    /// The allocator used to allocate and deallocate memory.
     allocator: std.mem.Allocator,
+
+    /// A map of sparse sets indexed by the type name.
     sparse_sets: std.StringHashMap(AnySparseSet),
+
+    /// The last entity created.
     last_entity: Entity = 0,
 
+    /// An opaque type to store a pointer to a sparse set.
     const AnySparseSet = struct {
+        /// The pointer to the sparse set.
         ptr: *anyopaque,
+
+        /// The deinitialization function.
         deinitFn: *const fn (ptr: *anyopaque) void,
+
+        /// The destruction function to deallocate the sparse set.
         destroyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
 
+        /// Initializes the sparse set pointer.
         fn init(ptr: anytype) AnySparseSet {
             const T = @TypeOf(ptr);
             const ptr_info = @typeInfo(T);
@@ -99,15 +123,19 @@ pub const Registry = struct {
             };
         }
 
+        /// Deinitializes the sparse set.
         fn deinit(self: *AnySparseSet) void {
             self.deinitFn(self.ptr);
         }
 
+        /// Destroys the sparse set.
         fn destroy(self: *AnySparseSet, allocator: std.mem.Allocator) void {
             self.destroyFn(self.ptr, allocator);
         }
     };
 
+    /// Retrieve the sparse set of the given type.
+    /// Allocates a new sparse set if it doesn't exist.
     fn sparse_set(self: *Registry, comptime T: type) !*SparseSet(T) {
         const name = @typeName(T);
 
@@ -123,6 +151,7 @@ pub const Registry = struct {
         return ss;
     }
 
+    /// Initializes the registry with the given allocator.
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
             .allocator = allocator,
@@ -130,6 +159,7 @@ pub const Registry = struct {
         };
     }
 
+    /// Deinitializes the registry.
     pub fn deinit(self: *Registry) void {
         var iterator = self.sparse_sets.valueIterator();
         while (iterator.next()) |ss| {
@@ -139,26 +169,60 @@ pub const Registry = struct {
         self.sparse_sets.deinit();
     }
 
+    /// Creates a new entity.
     pub fn create(self: *Registry) Entity {
         self.last_entity += 1;
         return self.last_entity;
     }
 
+    /// Returns whether an entity has the given component.
     pub fn has(self: *Registry, comptime T: type, entity: Entity) !bool {
-        const ss = try self.sparse_set(T);
-        return ss.has(entity);
+        const name = @typeName(T);
+        const maybe_ss = self.sparse_sets.get(name);
+
+        if (maybe_ss) |ss| {
+            return @as(*SparseSet(T), @ptrCast(@alignCast(ss.ptr))).has(entity);
+        }
+
+        return false;
     }
 
-    pub fn get(self: *Registry, comptime T: type, entity: Entity) !*T {
-        const ss = try self.sparse_set(T);
-        return ss.get(entity);
+    /// Retrieves the component of the given entity.
+    ///
+    /// Undefined behavior if the entity does not have the component.
+    pub fn get(self: *Registry, comptime T: type, entity: Entity) *T {
+        const name = @typeName(T);
+        const ss = self.sparse_sets.get(name).?;
+
+        return @as(*SparseSet(T), @ptrCast(@alignCast(ss.ptr))).get(entity);
     }
 
+    /// Tries to retrieve the component of the given entity.
+    ///
+    /// Returns an error if the entity does not have the component.
+    pub fn try_get(self: *Registry, comptime T: type, entity: Entity) !*T {
+        const name = @typeName(T);
+        const maybe_ss = self.sparse_sets.get(name);
+
+        if (maybe_ss) |ss| {
+            const cast_ss = @as(*SparseSet(T), @ptrCast(@alignCast(ss.ptr)));
+
+            if (cast_ss.has(entity))
+                return cast_ss.get(entity);
+
+            return error.ComponentNotFound;
+        }
+
+        return error.ComponentNotFound;
+    }
+
+    /// Sets the component of the given entity.
     pub fn set(self: *Registry, entity: Entity, component: anytype) !void {
         const ss = try self.sparse_set(@TypeOf(component));
         try ss.set(entity, component);
     }
 
+    /// Creates a view over the given types.
     pub fn view(self: *Registry, comptime Types: anytype) !View(Types) {
         const T = @TypeOf(Types);
         const info = @typeInfo(T);
